@@ -1,0 +1,244 @@
+// ==UserScript==
+// @name         Flashcard Auto Speak + Auto Next
+// @namespace    https://github.com/users/AdrianDeaq/projects/1/views/1
+// @version      1.5
+// @description  Speaks the flashcard word, waits 1s, repeats for 60s total, auto-flips the card, then clicks Next automatically.
+// @match        *://*/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+  const DEF = { total: 60, gap: 1, rate: 0.85, pitch: 1, voice: '' };
+  const load = () => { try { return Object.assign({}, DEF, JSON.parse(localStorage.getItem('vaFlash') || '{}')); } catch (e) { return { ...DEF }; } };
+  const cfg = load();
+  const save = () => { try { localStorage.setItem('vaFlash', JSON.stringify({ ...cfg, enabled })); } catch (e) {} };
+  let enabled = (() => { try { return !!JSON.parse(localStorage.getItem('vaFlash') || '{}').enabled; } catch (e) { return false; } })();
+
+  let session = 0, current = null, endAt = 0;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const css = document.createElement('style');
+  css.textContent = `
+  #va-flash-panel{position:fixed!important;right:16px!important;bottom:16px!important;z-index:2147483647!important;
+    background:var(--vbg)!important;color:var(--vfg)!important;border:2px solid var(--vbd)!important;border-radius:14px!important;
+    padding:12px 14px!important;min-width:230px!important;font:600 14px/1.4 system-ui,Arial,sans-serif!important;
+    box-shadow:0 6px 24px rgba(0,0,0,.35)!important;--vbg:#111827;--vfg:#fff;--vibg:#1f2937;--vifg:#fff;--vbd:#9ca3af}
+  #va-flash-panel.light{--vbg:#fff;--vfg:#111827;--vibg:#f3f4f6;--vifg:#111827;--vbd:#374151}
+  #va-flash-panel *{color:var(--vfg)!important;font-family:inherit!important;box-sizing:border-box!important;opacity:1!important}
+  #va-flash-panel .vr{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:8px}
+  #va-flash-panel input[type=number],#va-flash-panel select{background:var(--vibg)!important;color:var(--vifg)!important;
+    border:1.5px solid var(--vbd)!important;border-radius:8px!important;padding:5px 8px!important;font-size:14px!important;
+    font-weight:600!important;height:auto!important;margin:0!important}
+  #va-flash-panel input[type=number]{width:62px!important}
+  #va-flash-panel select{width:100%!important}
+  #va-flash-panel option{background:var(--vibg)!important;color:var(--vifg)!important}
+  #va-flash-panel button{background:#4f46e5!important;color:#fff!important;border:0!important;border-radius:9px!important;
+    padding:7px 14px!important;font-size:14px!important;font-weight:700!important;cursor:pointer!important}
+  #va-flash-panel button.on{background:#dc2626!important}
+  #va-flash-panel input[type=range]{accent-color:#6366f1;width:130px}
+  #va-flash-panel button.sec{background:transparent!important;color:var(--vfg)!important;border:1.5px solid var(--vbd)!important;padding:6px 10px!important;font-size:13px!important}
+  #va-flash-panel #va-guide{margin-top:10px;width:300px;max-width:80vw;max-height:260px;overflow:auto;padding:10px 12px;
+    background:var(--vibg)!important;border:1.5px solid var(--vbd);border-radius:10px;font-size:13px;font-weight:500;line-height:1.5}
+  #va-flash-panel #va-guide[hidden]{display:none!important}
+  #va-flash-panel #va-guide h4{margin:0 0 6px;font-size:14px}
+  #va-flash-panel #va-guide p{margin:6px 0}
+  #va-flash-panel #va-guide ol{margin:4px 0;padding-left:20px}
+  #va-flash-panel #va-guide li{margin-bottom:5px}
+  #va-flash-panel #va-status{font-size:14px;margin-top:8px}`;
+  document.head.appendChild(css);
+
+  const panel = document.createElement('div');
+  panel.id = 'va-flash-panel';
+  panel.innerHTML = `
+    <div class="vr" style="margin-top:0"><b style="font-size:15px">Auto Flashcard</b><button id="va-toggle"></button></div>
+    <div id="va-status">Idle</div>
+    <div class="vr"><label>Total (s) <input id="va-total" type="number" min="5"></label>
+      <label>Gap (s) <input id="va-gap" type="number" min="0" step="0.5"></label></div>
+    <div class="vr"><select id="va-voice"></select></div>
+    <div class="vr"><label>Speed <input id="va-rate" type="range" min="0.6" max="1.1" step="0.05"></label></div>
+    <div class="vr"><button id="va-preset" class="sec">45s method</button><button id="va-help" class="sec">How to use</button></div>
+    <div id="va-guide" hidden>
+      <h4>The 45-Second Active Vocabulary Method</h4>
+      <p><b>Step-by-step cycle for each word:</b></p>
+      <ol>
+        <li><b>Input phase (20–30 seconds):</b> Listen to the word audio, read the English/Vietnamese meaning, synonyms, and the example sentence to understand its full context.</li>
+        <li><b>The 15-second pause (active retrieval):</b> Do not wait passively. Just before the audio repeats the word, say aloud or whisper the meaning and example sentence from memory before the system reads it to you.</li>
+        <li><b>Verification:</b> Listen to the repeating audio to check if your recall was correct.</li>
+      </ol>
+      <p><b>Why it works:</b> Forcing your brain to retrieve the definition before hearing the answer triggers Active Recall. This is the key mechanism that shifts vocabulary from short-term memory into long-term memory efficiently.</p>
+      <p><b>Setup:</b> Click <i>45s method</i> (Total 45s, Gap 15s), press <i>Start</i>, and the script speaks, flips the card, and moves on by itself. Alt+S pauses or resumes.</p>
+    </div>`;
+  document.body.appendChild(panel);
+  const $ = id => panel.querySelector('#' + id);
+
+  // Pick light/dark panel so it always contrasts with the page behind it
+  function pageIsDark() {
+    for (let el = document.body; el; el = el.parentElement) {
+      const m = getComputedStyle(el).backgroundColor.match(/[\d.]+/g);
+      if (m && (m.length < 4 || +m[3] > 0.5)) return (0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2]) < 128;
+    }
+    return matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  const applyTheme = () => panel.classList.toggle('light', pageIsDark()); // dark page -> light panel
+  applyTheme(); setInterval(applyTheme, 2000);
+  $('va-total').value = cfg.total;
+  $('va-gap').value = cfg.gap;
+  $('va-total').onchange = e => { cfg.total = Math.max(5, +e.target.value || DEF.total); save(); };
+  $('va-gap').onchange = e => { cfg.gap = Math.max(0, +e.target.value || 0); save(); };
+  $('va-help').onclick = () => { const g = $('va-guide'); g.hidden = !g.hidden; $('va-help').textContent = g.hidden ? 'How to use' : 'Hide guide'; };
+  $('va-preset').onclick = () => { cfg.total = 45; cfg.gap = 15; $('va-total').value = 45; $('va-gap').value = 15; save(); status('Preset: 45s total, 15s gap'); };
+  $('va-rate').value = cfg.rate;
+  $('va-rate').oninput = e => { cfg.rate = +e.target.value; save(); };
+
+  // ---------- Natural voice picker ----------
+  function score(v) {
+    let n = 0;
+    if (/natural/i.test(v.name)) n += 100;                       // Edge "Microsoft ... Online (Natural)"
+    if (/online/i.test(v.name)) n += 40;
+    if (/aria|jenny|ava|emma|libby|sonia|michelle/i.test(v.name)) n += 30; // soft female neural voices
+    if (/google (us|uk) english/i.test(v.name)) n += 20;
+    if (/samantha|allison|ava|serena|karen|moira/i.test(v.name)) n += 15; // macOS/iOS
+    if (/en[-_]US/i.test(v.lang)) n += 10;
+    if (/compact|espeak|zira|david|mark/i.test(v.name)) n -= 20;   // robotic ones
+    return n;
+  }
+  function englishVoices() {
+    return speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)).sort((a, b) => score(b) - score(a));
+  }
+  function fillVoices() {
+    const list = englishVoices();
+    if (!list.length) return;
+    $('va-voice').innerHTML = list.map(v => `<option value="${v.name}">${v.name} (${v.lang})</option>`).join('');
+    $('va-voice').value = list.some(v => v.name === cfg.voice) ? cfg.voice : list[0].name;
+  }
+  $('va-voice').onchange = e => { cfg.voice = e.target.value; save(); say('natural'); };
+  fillVoices();
+  try { speechSynthesis.addEventListener('voiceschanged', fillVoices); } catch (e) {}
+
+  const status = t => { $('va-status').textContent = t; };
+  const paintBtn = () => { $('va-toggle').textContent = enabled ? 'Pause' : 'Start'; $('va-toggle').classList.toggle('on', enabled); };
+  $('va-toggle').onclick = () => { enabled ? stop() : start(); };
+
+  function start() { enabled = true; current = null; save(); paintBtn(); status('Looking for word…'); }
+  function stop() { enabled = false; session++; try { speechSynthesis.cancel(); } catch (e) {} save(); paintBtn(); status('Paused'); }
+  paintBtn();
+
+  // ---------- Find the word (largest visible short text on screen) ----------
+  function ownText(el) {
+    let t = '';
+    el.childNodes.forEach(n => { if (n.nodeType === 3) t += n.textContent; });
+    return t.trim();
+  }
+  function getWord() {
+    let best = null, bestSize = 0;
+    document.querySelectorAll('h1,h2,h3,h4,div,span,p,strong,b').forEach(el => {
+      if (panel.contains(el) || el.children.length > 3) return;
+      const t = ownText(el);
+      if (!/^[A-Za-z][A-Za-z' -]{1,30}$/.test(t)) return;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height || r.bottom < 0 || r.top > innerHeight) return;
+      const fs = parseFloat(getComputedStyle(el).fontSize);
+      if (fs > bestSize) { bestSize = fs; best = { text: t, el }; }
+    });
+    return bestSize >= 24 ? best : null; // the word is shown in a big font
+  }
+
+  // ---------- Auto flip: reveal the details side of the card ----------
+  function isShown(el) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height || r.bottom < 0 || r.top > innerHeight) return false;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0) return false;
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!top && (top === el || el.contains(top) || top.contains(el));
+  }
+  function detailsVisible() {
+    const re = /đồng nghĩa|ví dụ|synonym|example|trong ngữ cảnh/i;
+    for (const el of document.querySelectorAll('div,span,p,h5,h6,label')) {
+      if (panel.contains(el) || el.children.length > 2) continue;
+      if (re.test(ownText(el)) && isShown(el)) return true;
+    }
+    return false;
+  }
+  async function revealCard(wordEl, my) {
+    await sleep(500);
+    // click the word, then its parents (the card itself), until details show up
+    let el = wordEl;
+    for (let i = 0; i < 6 && el && el !== document.body; i++, el = el.parentElement) {
+      if (my !== session || !enabled) return;
+      if (detailsVisible()) return;
+      el.click();
+      await sleep(900);
+    }
+  }
+
+  // ---------- Speech ----------
+  function say(word) {
+    return new Promise(resolve => {
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(word);
+        u.lang = 'en-US';
+        u.rate = cfg.rate;
+        u.pitch = cfg.pitch;
+        u.volume = 0.9;
+        const list = englishVoices();
+        const v = list.find(v => v.name === (cfg.voice || $('va-voice').value)) || list[0];
+        if (v) { u.voice = v; u.lang = v.lang; }
+        const done = () => resolve();
+        u.onend = done; u.onerror = done;
+        speechSynthesis.speak(u);
+        setTimeout(done, 6000); // safety net
+      } catch (e) { resolve(); }
+    });
+  }
+
+  // ---------- Click "Next" ----------
+  function clickNext() {
+    const btns = [...document.querySelectorAll('button,[role="button"]')].filter(b => !panel.contains(b));
+    let target = btns.find(b => /next|tiếp|sau|›|»|→/i.test((b.getAttribute('aria-label') || '') + (b.title || '') + b.textContent.trim()));
+    if (!target) {
+      // icon-only buttons: pick the right-most one near the vertical middle of the screen
+      const icons = btns.filter(b => b.querySelector('svg,img,i') && !b.textContent.trim()).map(b => ({ b, r: b.getBoundingClientRect() }))
+        .filter(o => o.r.width && o.r.top > innerHeight * 0.2 && o.r.bottom < innerHeight * 0.85);
+      icons.sort((a, b) => b.r.left - a.r.left);
+      if (icons.length) target = icons[0].b;
+    }
+    if (target) { target.click(); return true; }
+    // fallback: arrow key
+    ['keydown', 'keyup'].forEach(type => document.dispatchEvent(new KeyboardEvent(type, { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, bubbles: true })));
+    return false;
+  }
+
+  // ---------- Per-card loop ----------
+  async function runCard(word, wordEl) {
+    const my = ++session;
+    endAt = Date.now() + cfg.total * 1000;
+    revealCard(wordEl, my); // auto-flip in parallel with speech
+    while (my === session && enabled && Date.now() < endAt) {
+      await say(word);
+      if (my !== session || !enabled) return;
+      await sleep(cfg.gap * 1000);
+    }
+    if (my === session && enabled) {
+      status('Next card…');
+      if (!clickNext()) status('Next button not found – tried ArrowRight');
+    }
+  }
+
+  // ---------- Watcher ----------
+  setInterval(() => {
+    if (!enabled) return;
+    const info = getWord();
+    const w = info && info.text;
+    if (w && w !== current) { current = w; runCard(w, info.el); }
+    else if (w) {
+      const left = Math.max(0, Math.round((endAt - Date.now()) / 1000));
+      status(`"${w}" · next in ${left}s`);
+    }
+  }, 400);
+
+  // Space+Alt toggles from keyboard
+  document.addEventListener('keydown', e => { if (e.altKey && e.code === 'KeyS') $('va-toggle').click(); });
+})();
